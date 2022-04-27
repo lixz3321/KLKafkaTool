@@ -7,13 +7,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.*;
 import org.apache.log4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
-import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
@@ -21,9 +16,11 @@ import java.util.concurrent.Future;
  * Created with IntelliJ IDEA.
  * Copyright@ Apache Open Source Organization
  *
- * @Auther: lxiz
+ * @Auther: lixz
  * @Date: 2022/04/22/16:41
  * @Description: kafka消息跨集群转发
+ *  *该程序自动获取起始偏移量，如需指定起始偏移量可通过手动执行kafka-consumer-groups，将其
+ *  分组的偏移量修改成期望的偏移量值
  */
 public class TransmitJob {
 
@@ -56,31 +53,41 @@ public class TransmitJob {
         //订阅topic
         consumer.subscribe(Arrays.asList(source_topic));
         LOG.info("输入主题订阅成功");
+        //至少多少条消息提交一次偏移量
+        int maxCommitRowNum = ConfUtil.getInt("max.commit.row.num");
+        //每个偏移量提交间隔内的已发送行数
+        int sendedRowNum = 0;
         //持续轮询消费源kafka
+        Future<RecordMetadata> future=null;
         try {
             while (true) {
-                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(Long.valueOf(ConfUtil.getString("poll.duration"))));
+                //拉取一批消息
+                ConsumerRecords<String, String> records = consumer.poll(ConfUtil.getInt("poll.duration"));
+                if(records.isEmpty()){
+                    continue;
+                }
+                //将这批消息逐条发送到目标主题
                 for (ConsumerRecord<String, String> record : records) {
-                    //发送消息到目标kafka
-                    Future<RecordMetadata> future = producer.send(new ProducerRecord<>(target_topic, record.value()));
-                    try {
-                        //消息发送失败将阻塞进程，从而阻止提交偏移量
-                        future.get();
-                        //提交偏移量
-                        consumer.commitAsync();
-                    } catch (Exception e) {
-                        if(!future.isCancelled()){
-                            future.cancel(true);
-                        }
-                        e.printStackTrace();
-                        consumer.close();
-                        LOG.info("消息发送失败，进程退出");
-                        return;
-                    }
+//                    System.out.println("当前一次拉取条数："+records.count()+"，发送消息："+record.value()+",偏移量："+record.offset());
+                    future = producer.send(new ProducerRecord<>(target_topic, record.value()));
+                    sendedRowNum++;
+                }
+                //判断已发送条数满足偏移量提交条件
+                if(sendedRowNum>=maxCommitRowNum){
+                    //确认这批消息的最后一条记录是否发送成功，如果broker异常，这里将会阻塞
+                    future.get();
+                    //这批消息最后一条记录发送成功即可提交偏移量
+                    consumer.commitAsync();
+//                    System.out.println("------------------------------ 提交偏移量成功！--------------批次条数："+sendedRowNum+"------------");
+                    sendedRowNum=0;
                 }
             }
-        }finally {
+        } catch (Exception e) {
+            e.printStackTrace();
+            LOG.error("转发作业遇到异常，即将退出！");
+        } finally {
             consumer.close();
+            producer.close();
         }
     }
 }
