@@ -24,7 +24,7 @@ import static kl.common.TopicPartitionConsumerFactory.runThreadNum;
  * @Auther: lixz
  * @Date: 2022/04/24/17:42
  * @Description: 一次性转发一批数据
- * 转发时不再提交偏移量，如需提交偏移量可在消费者配置中设置自动提交偏移量
+ * 转发时不再支持消息转发确认并提交偏移量，如需提交偏移量可在消费者配置中设置自动提交偏移量
  */
 public class BatchTransmitJob {
     public static Logger LOG = Logger.getLogger(BatchTransmitJob.class);
@@ -38,7 +38,7 @@ public class BatchTransmitJob {
      * @param args
      */
     public static void main(String[] args){
-        if(args.length!=3){
+        if(args.length<3){
             System.out.println(hint);
             return;
         }
@@ -61,12 +61,16 @@ public class BatchTransmitJob {
         int[] partitionNums = KafkaUtil.getPartitionNums(consumer, source_topic);
         //关闭临时消费者
         consumer.close();
-        //开始消费
+        //构造消费线程，开始消费
         TopicPartitionConsumerFactory factory = new TopicPartitionConsumerFactory(kafkaConf1,mod,start,end);
         factory.startConsumer();
         /*
         读取缓存中的数据并发送到目标topic
          */
+        if(runThreadNum==null){
+            LOG.error("消费线程异常，即将退出");
+            return;
+        }
         //阻塞，直到所有消费进程创建完成
         while(partitionNums.length>runThreadNum){
             try {
@@ -78,11 +82,12 @@ public class BatchTransmitJob {
         }
         Producer<String, String> producer = new KafkaProducer<String,String>(new KafkaConf(kafkaConf2).getProperties());
         LOG.info("开始转发数据···");
+        //如果消费线程未全部结束或者缓存队列不为空则继续发送
         while (runThreadNum>0 || !TopicPartitionConsumer.queue.isEmpty()){
             String value = TopicPartitionConsumer.queue.poll();
             if(value!=null){
                 producer.send(new ProducerRecord<>(target_topic, value));
-                System.out.println("发送消息："+value);
+//                System.out.println("发送消息："+value);
                 row_num++;
             }
             try {
